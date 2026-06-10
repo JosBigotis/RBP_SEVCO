@@ -23,6 +23,7 @@ def run_stv_tally(valid_ballots, seats):
         return "Aucun vote valide."
     
     ballots = [{'ranking': b, 'weight': 1.0} for b in valid_ballots]
+    
     candidates_data = supabase.table('candidates').select('name').execute().data
     active_candidates = set([c['name'] for c in candidates_data])
     elected = []
@@ -65,15 +66,13 @@ def run_stv_tally(valid_ballots, seats):
         else:
             if not counts: break
             
-            # --- LOGIQUE AVANCÉE DE DÉPARTAGE STV ---
             min_votes = min(counts.values())
             tied_candidates = [c for c, v in counts.items() if v == min_votes]
             
             if len(tied_candidates) > 1:
-                tally_log.append(f"⚠️ Égalité entre {', '.join(tied_candidates)} ({min_votes:.2f} votes). Analyse des préférences suivantes...")
+                tally_log.append(f"⚠️ Égalité entre {', '.join(tied_candidates)} ({min_votes:.2f} votes). Analyse des préférences...")
                 eliminated_candidate = None
                 
-                # Regarder le 2e choix, 3e choix, etc.
                 for rank_idx in range(1, len(candidates_data)):
                     rank_counts = {c: 0 for c in tied_candidates}
                     for b in ballots:
@@ -91,10 +90,9 @@ def run_stv_tally(valid_ballots, seats):
                         tally_log.append(f"🔍 Au choix n°{rank_idx+1}, {eliminated_candidate} est le moins plébiscité ({min_rank_votes} votes).")
                         break
                     elif len(worst_candidates) < len(tied_candidates):
-                        tied_candidates = worst_candidates # On réduit les ex-aequo
+                        tied_candidates = worst_candidates
                 
                 if not eliminated_candidate:
-                    import random
                     eliminated_candidate = random.choice(tied_candidates)
                     tally_log.append(f"🎲 Égalité totale persistante. Tirage au sort : {eliminated_candidate} est éliminé.")
                 
@@ -150,7 +148,7 @@ if node == "Panneau Administrateur":
             if st.button("Inscrire Votant"):
                 supabase.table('voters').insert({'voter_id': new_voter}).execute()
                 st.rerun()
-            voters = supabase.table('voters').select('voter_id').execute().data
+            voters = supabase.table('voters').select('voter_id').order('voter_id').execute().data
             st.write([v['voter_id'] for v in voters])
             if st.button("Effacer Votants"):
                 supabase.table('voters').delete().neq('voter_id', '0').execute()
@@ -160,49 +158,54 @@ if node == "Panneau Administrateur":
         seats = st.number_input("Nombre de sièges", min_value=1, value=1)
         
         if st.button("🚀 DÉMARRER L'ÉLECTION (Générer les Combinaisons)", type="primary"):
-            # 1. Reset states
             supabase.table('ballots').delete().neq('id', '00000000-0000-0000-0000-000000000000').execute()
             supabase.table('voter_receipts').delete().neq('voter_id', '0').execute()
             supabase.table('combinations').delete().neq('comb_id', '0').execute()
             supabase.table('system_state').upsert({'key': 'status', 'value': 'Ouvert'}).execute()
             supabase.table('system_state').upsert({'key': 'seats', 'value': str(seats)}).execute()
             
-            # 2. Generate Combinations and distribute limits
-            voter_ids = [v['voter_id'] for v in supabase.table('voters').select('voter_id').execute().data]
+            voters_data = supabase.table('voters').select('voter_id').order('voter_id').execute().data
+            voter_ids = [v['voter_id'] for v in voters_data]
             cand_names = [c['name'] for c in supabase.table('candidates').select('name').execute().data]
             num_voters = len(voter_ids)
-
+            
             if len(cand_names) > 5 or len(cand_names) == 0:
                 st.error("Erreur: Il faut entre 1 et 5 candidats.")
                 st.stop()
-
-            # Forcer au moins 2 combinaisons, proportionnelles au nombre de votants
-            num_combs = min(num_voters, max(2, num_voters // 2)) if num_voters > 1 else 1
+                
+            # Calcul logarithmique du nombre de combinaisons : C = floor(log2(N))
+            if num_voters > 0:
+                num_combs = max(1, int(math.log2(num_voters)))
+            else:
+                num_combs = 1
+                
             alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-
+            
             for i in range(num_combs):
                 comb_id = alphabet[i]
-                random.shuffle(cand_names)
-                mapping = {SHAPES[j]: cand_names[j] for j in range(len(cand_names))}
+                # Sélection aléatoire d'un sous-ensemble de formes géométriques égal au nombre de candidats
+                sampled_shapes = random.sample(SHAPES, len(cand_names))
+                shuffled_cands = list(cand_names)
+                random.shuffle(shuffled_cands)
+                mapping = {sampled_shapes[j]: shuffled_cands[j] for j in range(len(cand_names))}
+                
                 supabase.table('combinations').insert({
                     'comb_id': comb_id,
                     'mapping': mapping,
-                    'max_limit': 0
+                    'max_limit': 0 
                 }).execute()
 
-            # 3. Répartition mathématiquement équilibrée (comme une distribution de cartes)
+            # Répartition équilibrée stricte garantissant au minimum 2 personnes par lot
             comb_assignments = [alphabet[i % num_combs] for i in range(num_voters)]
-            random.shuffle(comb_assignments) # Mélange cryptographique des affectations
+            random.shuffle(comb_assignments)
 
-            # Assigner les votants
             for i, v_id in enumerate(voter_ids):
                 assigned_c_id = comb_assignments[i]
                 supabase.table('voters').update({'assigned_comb': assigned_c_id, 'has_voted': False}).eq('voter_id', v_id).execute()
                 current_limit = supabase.table('combinations').select('max_limit').eq('comb_id', assigned_c_id).execute().data[0]['max_limit']
                 supabase.table('combinations').update({'max_limit': current_limit + 1}).eq('comb_id', assigned_c_id).execute()
 
-            #st.success("L'élection est ouverte ! Combinaisons réparties équitablement.")
-            st.success("L'élection est ouverte ! Combinaisons générées secrètement.")
+            st.success(f"L'élection est ouverte ! {num_combs} combinaison(s) générée(s) stratégiquement.")
 
         if st.button("Clôturer l'Élection"):
             supabase.table('system_state').upsert({'key': 'status', 'value': 'Fermé'}).execute()
@@ -229,14 +232,31 @@ elif node == "Portail Votant":
             if not voter_data:
                 st.error("ID non reconnu.")
             else:
-                if voter_data[0]['has_voted']:
-                    st.warning("⚠️ Vous avez déjà voté. Soumettre un nouveau bulletin écrasera le précédent.")
                 st.session_state.voter_id = v_id
                 st.session_state.assigned_comb = voter_data[0]['assigned_comb']
                 st.rerun()
-
     else:
-        tab1, tab2 = st.tabs(["🎫 Centre de Remise des Billets", "✉️ Isoloir (Vote)"])
+        # Affichage du warning persistant ici pour éviter qu'il ne disparaisse au login
+        voter_data = supabase.table('voters').select('has_voted').eq('voter_id', st.session_state.voter_id).execute().data
+        if voter_data and voter_data[0]['has_voted']:
+            st.warning("⚠️ Vous avez déjà voté. Soumettre un nouveau bulletin écrasera le précédent.")
+
+        # Récupération de l'index du votant pour l'anonymisation visuelle
+        all_voters = supabase.table('voters').select('voter_id').order('voter_id').execute().data
+        voter_ids_list = [v['voter_id'] for v in all_voters]
+        try:
+            voter_index = voter_ids_list.index(st.session_state.voter_id) + 1
+        except ValueError:
+            voter_index = "?"
+
+        # Bouton de déconnexion disponible en permanence une fois connecté
+        if st.button("🚪 Se déconnecter (Voter plus tard)"):
+            del st.session_state.voter_id
+            if "assigned_comb" in st.session_state:
+                del st.session_state.assigned_comb
+            st.rerun()
+
+        tab1, tab2 = st.tabs(["🎫 Centre de Remise des Billets", f"✉️ Isoloir (Bulletin de Vote : {voter_index})"])
         
         with tab1:
             st.subheader("Votre Billet Secret")
@@ -255,14 +275,12 @@ elif node == "Portail Votant":
                 st.rerun()
 
         with tab2:
-            st.subheader("Bulletin de Vote")
-            st.write(f"**Votant:** {st.session_state.voter_id}")
+            st.subheader(f"Bulletin de Vote : {voter_index}")
             
-            # Use only the shapes required for the number of candidates
-            cands_count = len(supabase.table('candidates').select('name').execute().data)
-            available_shapes = SHAPES[:cands_count]
+            # Affichage permanent des 5 formes géométriques globales
+            available_shapes = SHAPES
+            index_labels = [f"Choix {i}" for i in range(1, len(available_shapes) + 1)]
             
-            index_labels = [f"Choix {i}" for i in range(1, cands_count + 1)]
             if "ballot_df" not in st.session_state or list(st.session_state.ballot_df.columns) != available_shapes:
                 st.session_state.ballot_df = pd.DataFrame(False, index=index_labels, columns=available_shapes)
 
@@ -279,36 +297,32 @@ elif node == "Portail Votant":
                     selected = row[row == True].index.tolist()
                     if len(selected) > 1: valid = False
                     elif selected: ranking.append(selected[0])
-
+                
                 if not valid or not ranking:
                     st.error("Bulletin invalide. Vérifiez vos choix.")
                 elif not typed_comb_id:
                     st.error("Vous devez saisir un ID de combinaison.")
                 else:
-                    # Création du Hash de suivi anonyme (Salé pour empêcher le dictionnaire)
                     import hashlib
                     secret_salt = "SEVCO_EPITA_2026_SECRET"
                     v_hash = hashlib.sha256((st.session_state.voter_id + secret_salt).encode()).hexdigest()
 
-                    # 1. Supprimer l'ancien vote (Vote écrasé)
+                    # Mécanisme de révocation automatique / écrasement du vote précédent
                     supabase.table('ballots').delete().eq('voter_hash', v_hash).execute()
 
-                    # 2. Poster le nouveau bulletin
                     supabase.table('ballots').insert({
                         'comb_id': typed_comb_id.strip().upper(),
                         'shapes_ranking': ranking,
                         'voter_hash': v_hash
                     }).execute()
-
-                    # 3. Mettre à jour le statut
+                    
                     supabase.table('voter_receipts').upsert({'voter_id': st.session_state.voter_id}).execute()
                     supabase.table('voters').update({'has_voted': True}).eq('voter_id', st.session_state.voter_id).execute()
-
+                    
                     del st.session_state.voter_id
-                    st.success("A voté ! Votre choix a été cryptographiquement scellé.")
+                    st.success("A voté !")
                     time.sleep(2)
                     st.rerun()
-
 
 
 # ==========================================
@@ -323,7 +337,6 @@ elif node == "Moniteur d'Infrastructure (Projecteur)":
     st.subheader("1. Mix-Net (Anonymisation des Flux)")
     ballots = supabase.table('ballots').select('*').execute().data
     if ballots:
-        # Simulate Mix-net shuffling
         shuffled = list(ballots)
         random.shuffle(shuffled)
         df_mix = pd.DataFrame([{"ID Combinaison": b['comb_id'], "Choix Formes": " > ".join(b['shapes_ranking'])} for b in shuffled])
@@ -332,7 +345,7 @@ elif node == "Moniteur d'Infrastructure (Projecteur)":
         st.write("Le Mix-Net est vide.")
 
     st.divider()
-    st.subheader("2. Autorités de Comptage (Vérification et Décodage)")
+    st.subheader("2. Réception des bulletins (Vérification et Décodage)")
     combs = supabase.table('combinations').select('*').execute().data
     
     valid_candidate_ballots = []
@@ -352,19 +365,29 @@ elif node == "Moniteur d'Infrastructure (Projecteur)":
                 st.error("🚨 FRAUDE DÉTECTÉE ! Limite dépassée. Tous les votes de ce lot sont annulés.")
             else:
                 st.success("Intégrité validée.")
-                # Translate shapes to candidates
                 for b in comb_ballots:
-                    cand_ranking = [comb['mapping'].get(shape, shape) for shape in b['shapes_ranking']]
-                    valid_candidate_ballots.append(cand_ranking)
-                    st.caption(f"Décrypté: {' > '.join(cand_ranking)}")
+                    # Traduction stricte : on ignore les formes non mappées dans cette combinaison spécifique
+                    cand_ranking = [comb['mapping'].get(shape) for shape in b['shapes_ranking'] if comb['mapping'].get(shape) is not None]
+                    if cand_ranking:
+                        valid_candidate_ballots.append(cand_ranking)
+                        st.caption(f"Décrypté: {' > '.join(cand_ranking)}")
 
     st.divider()
     st.subheader("3. Centre de Décompte (Tally)")
     
-    # Vérifiabilité individuelle
+    # Vérifiabilité individuelle par index numériques anonymes
+    all_voters_data = supabase.table('voters').select('voter_id').order('voter_id').execute().data
+    voter_ids_list = [v['voter_id'] for v in all_voters_data]
     receipts = supabase.table('voter_receipts').select('voter_id').execute().data
-    st.write("Votants ayant déposé un bulletin (Vérifiabilité individuelle) :")
-    st.write(", ".join([r['voter_id'] for r in receipts]) if receipts else "Aucun déposant.")
+    
+    st.write("Numéros de bulletins reçus enregistrés (Vérifiabilité individuelle anonyme) :")
+    if receipts:
+        receipt_indices = [voter_ids_list.index(r['voter_id']) + 1 for r in receipts if r['voter_id'] in voter_ids_list]
+        # Tri des index pour effacer l'ordre chronologique de passage
+        receipt_indices.sort()
+        st.write(", ".join(map(str, receipt_indices)))
+    else:
+        st.write("Aucun bulletin déposé.")
     
     # Real-Time First Preference
     if valid_candidate_ballots:
