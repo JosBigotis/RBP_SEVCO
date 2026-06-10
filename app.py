@@ -173,7 +173,6 @@ if node == "Panneau Administrateur":
                 st.error("Erreur: Il faut entre 1 et 5 candidats.")
                 st.stop()
                 
-            # Calcul logarithmique du nombre de combinaisons : C = floor(log2(N))
             if num_voters > 0:
                 num_combs = max(1, int(math.log2(num_voters)))
             else:
@@ -183,7 +182,6 @@ if node == "Panneau Administrateur":
             
             for i in range(num_combs):
                 comb_id = alphabet[i]
-                # Sélection aléatoire d'un sous-ensemble de formes géométriques égal au nombre de candidats
                 sampled_shapes = random.sample(SHAPES, len(cand_names))
                 shuffled_cands = list(cand_names)
                 random.shuffle(shuffled_cands)
@@ -195,7 +193,6 @@ if node == "Panneau Administrateur":
                     'max_limit': 0 
                 }).execute()
 
-            # Répartition équilibrée stricte garantissant au minimum 2 personnes par lot
             comb_assignments = [alphabet[i % num_combs] for i in range(num_voters)]
             random.shuffle(comb_assignments)
 
@@ -236,12 +233,10 @@ elif node == "Portail Votant":
                 st.session_state.assigned_comb = voter_data[0]['assigned_comb']
                 st.rerun()
     else:
-        # Affichage du warning persistant ici pour éviter qu'il ne disparaisse au login
         voter_data = supabase.table('voters').select('has_voted').eq('voter_id', st.session_state.voter_id).execute().data
         if voter_data and voter_data[0]['has_voted']:
             st.warning("⚠️ Vous avez déjà voté. Soumettre un nouveau bulletin écrasera le précédent.")
 
-        # Récupération de l'index du votant pour l'anonymisation visuelle
         all_voters = supabase.table('voters').select('voter_id').order('voter_id').execute().data
         voter_ids_list = [v['voter_id'] for v in all_voters]
         try:
@@ -249,7 +244,6 @@ elif node == "Portail Votant":
         except ValueError:
             voter_index = "?"
 
-        # Bouton de déconnexion disponible en permanence une fois connecté
         if st.button("🚪 Se déconnecter (Voter plus tard)"):
             del st.session_state.voter_id
             if "assigned_comb" in st.session_state:
@@ -275,9 +269,10 @@ elif node == "Portail Votant":
                 st.rerun()
 
         with tab2:
-            st.subheader(f"Bulletin de Vote : {voter_index}")
+            # Structure d'affichage demandée
+            st.subheader(f"Bulletin de vote: {voter_index}")
+            st.markdown(f"**voter ID:** `{st.session_state.voter_id}`")
             
-            # Affichage permanent des 5 formes géométriques globales
             available_shapes = SHAPES
             index_labels = [f"Choix {i}" for i in range(1, len(available_shapes) + 1)]
             
@@ -307,7 +302,6 @@ elif node == "Portail Votant":
                     secret_salt = "SEVCO_EPITA_2026_SECRET"
                     v_hash = hashlib.sha256((st.session_state.voter_id + secret_salt).encode()).hexdigest()
 
-                    # Mécanisme de révocation automatique / écrasement du vote précédent
                     supabase.table('ballots').delete().eq('voter_hash', v_hash).execute()
 
                     supabase.table('ballots').insert({
@@ -330,80 +324,85 @@ elif node == "Portail Votant":
 # ==========================================
 elif node == "Moniteur d'Infrastructure (Projecteur)":
     st.title("👁️ Architecture de Dépouillement")
-    if st.button("Rafraîchir les données en direct"):
-        st.rerun()
     
-    st.divider()
-    st.subheader("1. Mix-Net (Anonymisation des Flux)")
-    ballots = supabase.table('ballots').select('*').execute().data
-    if ballots:
-        shuffled = list(ballots)
-        random.shuffle(shuffled)
-        df_mix = pd.DataFrame([{"ID Combinaison": b['comb_id'], "Choix Formes": " > ".join(b['shapes_ranking'])} for b in shuffled])
-        st.dataframe(df_mix, use_container_width=True)
-    else:
-        st.write("Le Mix-Net est vide.")
+    # Ajout du verrouillage par mot de passe exigé
+    infra_pwd = st.text_input("Mot de passe Réseau Infrastructure", type="password")
+    
+    if infra_pwd == "infra123":
+        st.success("Accès sécurisé accordé.")
+        
+        if st.button("Rafraîchir les données en direct"):
+            st.rerun()
+        
+        st.divider()
+        st.subheader("1. Mix-Net (Anonymisation des Flux)")
+        ballots = supabase.table('ballots').select('*').execute().data
+        if ballots:
+            shuffled = list(ballots)
+            random.shuffle(shuffled)
+            df_mix = pd.DataFrame([{"ID Combinaison": b['comb_id'], "Choix Formes": " > ".join(b['shapes_ranking'])} for b in shuffled])
+            st.dataframe(df_mix, use_container_width=True)
+        else:
+            st.write("Le Mix-Net est vide.")
 
-    st.divider()
-    st.subheader("2. Réception des bulletins (Vérification et Décodage)")
-    combs = supabase.table('combinations').select('*').execute().data
-    
-    valid_candidate_ballots = []
-    
-    col1, col2, col3 = st.columns(3)
-    cols = [col1, col2, col3]
-    
-    for i, comb in enumerate(combs):
-        with cols[i % 3]:
-            st.write(f"### Lot: {comb['comb_id']}")
-            st.write(f"Limite autorisée: **{comb['max_limit']}**")
-            
-            comb_ballots = [b for b in ballots if b['comb_id'] == comb['comb_id']]
-            st.write(f"Bulletins reçus: **{len(comb_ballots)}**")
-            
-            if len(comb_ballots) > comb['max_limit']:
-                st.error("🚨 FRAUDE DÉTECTÉE ! Limite dépassée. Tous les votes de ce lot sont annulés.")
-            else:
-                st.success("Intégrité validée.")
-                for b in comb_ballots:
-                    # Traduction stricte : on ignore les formes non mappées dans cette combinaison spécifique
-                    cand_ranking = [comb['mapping'].get(shape) for shape in b['shapes_ranking'] if comb['mapping'].get(shape) is not None]
-                    if cand_ranking:
-                        valid_candidate_ballots.append(cand_ranking)
-                        st.caption(f"Décrypté: {' > '.join(cand_ranking)}")
+        st.divider()
+        st.subheader("2. Réception des bulletins (Vérification et Décodage)")
+        combs = supabase.table('combinations').select('*').execute().data
+        
+        valid_candidate_ballots = []
+        
+        col1, col2, col3 = st.columns(3)
+        cols = [col1, col2, col3]
+        
+        for i, comb in enumerate(combs):
+            with cols[i % 3]:
+                st.write(f"### Lot: {comb['comb_id']}")
+                st.write(f"Limite autorisée: **{comb['max_limit']}**")
+                
+                comb_ballots = [b for b in ballots if b['comb_id'] == comb['comb_id']]
+                st.write(f"Bulletins reçus: **{len(comb_ballots)}**")
+                
+                if len(comb_ballots) > comb['max_limit']:
+                    st.error("🚨 FRAUDE DÉTECTÉE ! Limite dépassée. Tous les votes de ce lot sont annulés.")
+                else:
+                    st.success("Intégrité validée.")
+                    for b in comb_ballots:
+                        cand_ranking = [comb['mapping'].get(shape) for shape in b['shapes_ranking'] if comb['mapping'].get(shape) is not None]
+                        if cand_ranking:
+                            valid_candidate_ballots.append(cand_ranking)
+                            st.caption(f"Décrypté: {' > '.join(cand_ranking)}")
 
-    st.divider()
-    st.subheader("3. Centre de Décompte (Tally)")
-    
-    # Vérifiabilité individuelle par index numériques anonymes
-    all_voters_data = supabase.table('voters').select('voter_id').order('voter_id').execute().data
-    voter_ids_list = [v['voter_id'] for v in all_voters_data]
-    receipts = supabase.table('voter_receipts').select('voter_id').execute().data
-    
-    st.write("Numéros de bulletins reçus enregistrés (Vérifiabilité individuelle anonyme) :")
-    if receipts:
-        receipt_indices = [voter_ids_list.index(r['voter_id']) + 1 for r in receipts if r['voter_id'] in voter_ids_list]
-        # Tri des index pour effacer l'ordre chronologique de passage
-        receipt_indices.sort()
-        st.write(", ".join(map(str, receipt_indices)))
-    else:
-        st.write("Aucun bulletin déposé.")
-    
-    # Real-Time First Preference
-    if valid_candidate_ballots:
-        first_prefs = {}
-        for b in valid_candidate_ballots:
-            first = b[0]
-            first_prefs[first] = first_prefs.get(first, 0) + 1
-            
-        st.write("### Intentions de 1er Choix (Temps Réel)")
-        st.bar_chart(pd.DataFrame(list(first_prefs.items()), columns=["Candidat", "Votes"]).set_index("Candidat"))
+        st.divider()
+        st.subheader("3. Centre de Décompte (Tally)")
+        
+        all_voters_data = supabase.table('voters').select('voter_id').order('voter_id').execute().data
+        voter_ids_list = [v['voter_id'] for v in all_voters_data]
+        receipts = supabase.table('voter_receipts').select('voter_id').execute().data
+        
+        st.write("Numéros de bulletins reçus enregistrés (Vérifiabilité individuelle anonyme) :")
+        if receipts:
+            receipt_indices = [voter_ids_list.index(r['voter_id']) + 1 for r in receipts if r['voter_id'] in voter_ids_list]
+            receipt_indices.sort()
+            st.write(", ".join(map(str, receipt_indices)))
+        else:
+            st.write("Aucun bulletin déposé.")
+        
+        if valid_candidate_ballots:
+            first_prefs = {}
+            for b in valid_candidate_ballots:
+                first = b[0]
+                first_prefs[first] = first_prefs.get(first, 0) + 1
+                
+            st.write("### Intentions de 1er Choix (Temps Réel)")
+            st.bar_chart(pd.DataFrame(list(first_prefs.items()), columns=["Candidat", "Votes"]).set_index("Candidat"))
 
-    # STV Final Execution
-    status_req = supabase.table('system_state').select('value').eq('key', 'status').execute().data
-    if status_req and status_req[0]['value'] == "Fermé":
-        seats = int(supabase.table('system_state').select('value').eq('key', 'seats').execute().data[0]['value'])
-        st.write("### Décompte Officiel STV")
-        st.text_area("Log de l'algorithme", run_stv_tally(valid_candidate_ballots, seats), height=300)
-    else:
-        st.warning("L'élection est toujours en cours. Le décompte STV final est verrouillé.")
+        status_req = supabase.table('system_state').select('value').eq('key', 'status').execute().data
+        if status_req and status_req[0]['value'] == "Fermé":
+            seats = int(supabase.table('system_state').select('value').eq('key', 'seats').execute().data[0]['value'])
+            st.write("### Décompte Officiel STV")
+            st.text_area("Log de l'algorithme", run_stv_tally(valid_candidate_ballots, seats), height=300)
+        else:
+            st.warning("L'élection est toujours en cours. Le décompte STV final est verrouillé.")
+            
+    elif infra_pwd != "":
+        st.error("🔒 Clé d'infrastructure non valide. Accès refusé.")
