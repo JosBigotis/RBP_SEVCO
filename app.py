@@ -126,7 +126,7 @@ if node == "Panneau Administrateur":
         
         if st.button("🚀 DÉMARRER L'ÉLECTION (Générer les Combinaisons)", type="primary"):
             # 1. Reset states
-            supabase.table('ballots').delete().neq('id', '0').execute()
+            supabase.table('ballots').delete().neq('id', '00000000-0000-0000-0000-000000000000').execute()
             supabase.table('voter_receipts').delete().neq('voter_id', '0').execute()
             supabase.table('combinations').delete().neq('comb_id', '0').execute()
             supabase.table('system_state').upsert({'key': 'status', 'value': 'Ouvert'}).execute()
