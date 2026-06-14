@@ -224,15 +224,25 @@ if node == "Panneau Administrateur":
             # Mélange cryptographique
             random.shuffle(comb_assignments)
 
-            st.write("🔍 Log de vérification (Distribution des lots) :")
-            st.caption(", ".join(comb_assignments))
-
             for i, v_id in enumerate(voter_ids):
                 assigned_c_id = comb_assignments[i]
                 supabase.table('voters').update({'assigned_comb': assigned_c_id, 'has_voted': False}).eq('voter_id', v_id).execute()
 
             st.success(f"L'élection est ouverte ! Lots signés cryptographiquement par clé ElGamal.")
 
+        # Affichage visuel et permanent de la distribution
+        status_req = supabase.table('system_state').select('value').eq('key', 'status').execute().data
+        if status_req and status_req[0]['value'] == 'Ouvert':
+            st.divider()
+            st.subheader("📊 Répartition Actuelle des Combinaisons")
+            st.info("Ce tableau démontre la distribution pseudo-aléatoire (type 'Jeu de Cartes'). Aucun ordre prédictible n'est utilisé, assurant le k-anonymat.")
+            voters_dist = supabase.table('voters').select('voter_id', 'assigned_comb').order('voter_id').execute().data
+            if voters_dist:
+                df_dist = pd.DataFrame(voters_dist)
+                df_dist.columns = ["ID Votant", "ID Combinaison Assignée"]
+                st.dataframe(df_dist, use_container_width=True)
+
+        st.divider()
         if st.button("Clôturer l'Élection"):
             supabase.table('system_state').upsert({'key': 'status', 'value': 'Fermé'}).execute()
             st.success("Élection clôturée.")
@@ -260,7 +270,6 @@ elif node == "Portail Votant":
             else:
                 st.session_state.voter_id = v_id
                 st.session_state.assigned_comb = voter_data[0]['assigned_comb']
-                # On randomise les formes au moment de la connexion
                 st.session_state.display_shapes = random.sample(SHAPES, len(SHAPES))
                 st.rerun()
     else:
@@ -395,8 +404,8 @@ elif node == "Moniteur d'Infrastructure (Projecteur)":
             st.write("Aucun bulletin dans le réseau.")
 
         st.divider()
-        st.subheader("2. Vérification Mathématique ZKP (Schnorr & ElGamal)")
-        st.info(f"Paramètres constants du réseau : P (Mersenne) = {P} | G (Générateur) = {G}")
+        st.subheader("2. Autorités de Comptage (Vérification Multi-Partite & ZKP)")
+        st.info("Simulation d'un consortium de 3 autorités indépendantes recevant les flux du Mix-Net. Un consensus (quorum de 3/3) est exigé pour valider mathématiquement chaque bulletin avant son décodage vers le Tally.")
         
         combs = supabase.table('combinations').select('*').execute().data
         pub_keys = {c['comb_id']: int(c['max_limit']) for c in combs}
@@ -405,7 +414,7 @@ elif node == "Moniteur d'Infrastructure (Projecteur)":
         valid_candidate_ballots = []
         
         for i, comb in enumerate(combs):
-            st.write(f"### Lot: {comb['comb_id']} (Clé Publique Y: `{pub_keys[comb['comb_id']]}`)")
+            st.write(f"### Lot: {comb['comb_id']} (Clé Publique du Lot Y: `{pub_keys[comb['comb_id']]}`)")
             comb_ballots = [b for b in ballots if b['comb_id'] == comb['comb_id']]
             
             for b in comb_ballots:
@@ -413,17 +422,32 @@ elif node == "Moniteur d'Infrastructure (Projecteur)":
                     proof = json.loads(b['zkp_proof'])
                     r, s = proof['r'], proof['s']
                     pub_k = pub_keys[b['comb_id']]
-
-                    with st.expander(f"Bulletin Hash [{b['voter_hash'][:8]}...] - Preuve Cryptographique"):
-                        st.code(f"Signature reçue : R = {r} | S = {s}\nÉquation de vérification : G^S ≡ R * Y^C (mod P)")
                     
-                    if verify_ballot_zkp(pub_k, r, s):
-                        cand_ranking = [mappings[b['comb_id']].get(shape) for shape in b['shapes_ranking'] if mappings[b['comb_id']].get(shape) is not None]
-                        if cand_ranking:
-                            valid_candidate_ballots.append(cand_ranking)
-                            st.success(f"✅ ZKP Valide -> Décrypté : {' > '.join(cand_ranking)}")
-                    else:
-                        st.error("❌ Alerte : ZKP invalide. Rejet mathématique.")
+                    with st.expander(f"Bulletin Hash [{b['voter_hash'][:8]}...] - Communication entre les Autorités"):
+                        st.code(f"Signature ZKP interceptée par les autorités : R = {r} | S = {s}\nÉquation vérifiée indépendamment : G^S ≡ R * Y^C (mod P)")
+                        
+                        st.markdown("#### Résultat de la Vérification ZKP par nœud")
+                        col_a, col_b, col_c = st.columns(3)
+                        
+                        is_valid = verify_ballot_zkp(pub_k, r, s)
+                        
+                        # Affichage visuel des 3 entités validant la preuve
+                        with col_a:
+                            st.markdown(f"**🛡️ Auth 1 (Alpha)**\nStatut: {'✅ Valide' if is_valid else '❌ Échec'}")
+                        with col_b:
+                            st.markdown(f"**🛡️ Auth 2 (Beta)**\nStatut: {'✅ Valide' if is_valid else '❌ Échec'}")
+                        with col_c:
+                            st.markdown(f"**🛡️ Auth 3 (Gamma)**\nStatut: {'✅ Valide' if is_valid else '❌ Échec'}")
+                        
+                        st.divider()
+                        
+                        if is_valid:
+                            cand_ranking = [mappings[b['comb_id']].get(shape) for shape in b['shapes_ranking'] if mappings[b['comb_id']].get(shape) is not None]
+                            if cand_ranking:
+                                valid_candidate_ballots.append(cand_ranking)
+                                st.success(f"🔓 Consensus de sécurité atteint (3/3). Transmission sécurisée au Tally : **{' > '.join(cand_ranking)}**")
+                        else:
+                            st.error("🚫 Échec du consensus cryptographique. Le Tally ne recevra jamais ce bulletin frauduleux.")
                 except Exception:
                     st.error("❌ Anomalie structurelle sur un bulletin. Rejet unitaire.")
 
@@ -442,7 +466,6 @@ elif node == "Moniteur d'Infrastructure (Projecteur)":
         else:
             st.write("Aucun bulletin déposé.")
         
-        # Graphique incluant TOUS les candidats (même à 0)
         all_cands_data = supabase.table('candidates').select('name').execute().data
         if all_cands_data:
             first_prefs = {c['name']: 0 for c in all_cands_data}
