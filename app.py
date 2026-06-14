@@ -413,8 +413,8 @@ elif node == "Moniteur d'Infrastructure (Projecteur)":
                     proof = json.loads(b['zkp_proof'])
                     r, s = proof['r'], proof['s']
                     pub_k = pub_keys[b['comb_id']]
-                    
-                    with st.expander(f"Bulletin Hash [{b['voter_hash'][:8]...}] - Preuve Cryptographique"):
+
+                    with st.expander(f"Bulletin Hash [{b['voter_hash'][:8]}...] - Preuve Cryptographique"):
                         st.code(f"Signature reçue : R = {r} | S = {s}\nÉquation de vérification : G^S ≡ R * Y^C (mod P)")
                     
                     if verify_ballot_zkp(pub_k, r, s):
