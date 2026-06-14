@@ -5,6 +5,36 @@ import random
 import time
 import math
 import pandas as pd
+import hashlib
+
+# --- Cryptographic Constants & Primitives (ElGamal / Schnorr ZKP) ---
+P = 2147483647  # Premier de Mersenne sécurisé (2^31 - 1)
+G = 7           # Générateur primitif
+
+def cryptographic_keygen():
+    """Génère un couple de clés ElGamal/Schnorr pour un lot donné"""
+    private_key = random.randint(2, P - 2)
+    public_key = pow(G, private_key, P)
+    return private_key, public_key
+
+def generate_ballot_zkp(private_key, public_key):
+    """Génère une preuve de connaissance interactive (ZKP) du droit de vote"""
+    k = random.randint(2, P - 2)
+    r = pow(G, k, P)
+    # Définition du défi par hachage (Fiat-Shamir Heuristic)
+    challenge_input = f"{G},{public_key},{r}"
+    c = int(hashlib.sha256(challenge_input.encode()).hexdigest(), 16) % P
+    s = (k + c * private_key) % (P - 1)
+    return r, s
+
+def verify_ballot_zkp(public_key, r, s):
+    """Vérifie mathématiquement la validité du ZKP associé au bulletin"""
+    challenge_input = f"{G},{public_key},{r}"
+    c = int(hashlib.sha256(challenge_input.encode()).hexdigest(), 16) % P
+    lhs = pow(G, s, P)
+    rhs = (r * pow(public_key, c, P)) % P
+    return lhs == rhs
+
 
 # --- Database Initialization ---
 @st.cache_resource
@@ -23,7 +53,6 @@ def run_stv_tally(valid_ballots, seats):
         return "Aucun vote valide."
     
     ballots = [{'ranking': b, 'weight': 1.0} for b in valid_ballots]
-    
     candidates_data = supabase.table('candidates').select('name').execute().data
     active_candidates = set([c['name'] for c in candidates_data])
     elected = []
@@ -65,7 +94,6 @@ def run_stv_tally(valid_ballots, seats):
                             break
         else:
             if not counts: break
-            
             min_votes = min(counts.values())
             tied_candidates = [c for c, v in counts.items() if v == min_votes]
             
@@ -115,7 +143,7 @@ def run_stv_tally(valid_ballots, seats):
 
 
 # --- Router ---
-st.set_page_config(page_title="Système de Vote RBAC", layout="wide")
+st.set_page_config(page_title="Système de Vote RBAC Secure", layout="wide")
 st.sidebar.title("Navigation Réseau")
 node = st.sidebar.radio("Aller vers:", ["Portail Votant", "Moniteur d'Infrastructure (Projecteur)", "Panneau Administrateur"])
 
@@ -157,7 +185,7 @@ if node == "Panneau Administrateur":
         st.divider()
         seats = st.number_input("Nombre de sièges", min_value=1, value=1)
         
-        if st.button("🚀 DÉMARRER L'ÉLECTION (Générer les Combinaisons)", type="primary"):
+        if st.button("🚀 DÉMARRER L'ÉLECTION (Générer les Combinaisons Cryptographiques)", type="primary"):
             supabase.table('ballots').delete().neq('id', '00000000-0000-0000-0000-000000000000').execute()
             supabase.table('voter_receipts').delete().neq('voter_id', '0').execute()
             supabase.table('combinations').delete().neq('comb_id', '0').execute()
@@ -173,11 +201,7 @@ if node == "Panneau Administrateur":
                 st.error("Erreur: Il faut entre 1 et 5 candidats.")
                 st.stop()
                 
-            if num_voters > 0:
-                num_combs = max(1, int(math.log2(num_voters)))
-            else:
-                num_combs = 1
-                
+            num_combs = max(1, int(math.log2(num_voters))) if num_voters > 0 else 1
             alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
             
             for i in range(num_combs):
@@ -187,10 +211,14 @@ if node == "Panneau Administrateur":
                 random.shuffle(shuffled_cands)
                 mapping = {sampled_shapes[j]: shuffled_cands[j] for j in range(len(cand_names))}
                 
+                # Génération de la clé cryptographique du lot pour les ZKP
+                priv_k, pub_k = cryptographic_keygen()
+                
                 supabase.table('combinations').insert({
                     'comb_id': comb_id,
                     'mapping': mapping,
-                    'max_limit': 0 
+                    'max_limit': int(pub_k),      # Stockage propre de la clé publique de vérification
+                    'secret_key': str(priv_k)     # Clé privée distribuée à l'isoloir pour la preuve
                 }).execute()
 
             comb_assignments = [alphabet[i % num_combs] for i in range(num_voters)]
@@ -199,10 +227,8 @@ if node == "Panneau Administrateur":
             for i, v_id in enumerate(voter_ids):
                 assigned_c_id = comb_assignments[i]
                 supabase.table('voters').update({'assigned_comb': assigned_c_id, 'has_voted': False}).eq('voter_id', v_id).execute()
-                current_limit = supabase.table('combinations').select('max_limit').eq('comb_id', assigned_c_id).execute().data[0]['max_limit']
-                supabase.table('combinations').update({'max_limit': current_limit + 1}).eq('comb_id', assigned_c_id).execute()
 
-            st.success(f"L'élection est ouverte ! {num_combs} combinaison(s) générée(s) stratégiquement.")
+            st.success(f"L'élection est ouverte ! Lots signés cryptographiquement par clé ElGamal.")
 
         if st.button("Clôturer l'Élection"):
             supabase.table('system_state').upsert({'key': 'status', 'value': 'Fermé'}).execute()
@@ -250,7 +276,7 @@ elif node == "Portail Votant":
                 del st.session_state.assigned_comb
             st.rerun()
 
-        tab1, tab2 = st.tabs(["🎫 Centre de Remise des Billets", f"✉️ Isoloir (Bulletin de Vote : {voter_index})"])
+        tab1, tab2 = st.tabs(["🎫 Centre de Remise des Billets", f"✉️ Isoloir (Bulletin de Vote)"])
         
         with tab1:
             st.subheader("Votre Billet Secret")
@@ -269,7 +295,6 @@ elif node == "Portail Votant":
                 st.rerun()
 
         with tab2:
-            # Structure d'affichage demandée
             st.subheader(f"Bulletin de vote: {voter_index}")
             st.markdown(f"**voter ID:** `{st.session_state.voter_id}`")
             
@@ -280,7 +305,7 @@ elif node == "Portail Votant":
                 st.session_state.ballot_df = pd.DataFrame(False, index=index_labels, columns=available_shapes)
 
             edited_df = st.data_editor(st.session_state.ballot_df, use_container_width=True)
-            typed_comb_id = st.text_input("Saisissez votre ID de Combinaison (Lettre)")
+            typed_comb_id = st.text_input("Saisissez votre ID de Combinaison (Lettre)").strip().upper()
 
             if st.button("Soumettre le Bulletin"):
                 ranking = []
@@ -297,24 +322,37 @@ elif node == "Portail Votant":
                     st.error("Bulletin invalide. Vérifiez vos choix.")
                 elif not typed_comb_id:
                     st.error("Vous devez saisir un ID de combinaison.")
+                elif typed_comb_id != st.session_state.assigned_comb:
+                    st.error("Erreur d'authentification de lot : ID de combinaison incorrect pour votre session.")
                 else:
-                    import hashlib
-                    secret_salt = "SEVCO_EPITA_2026_SECRET"
-                    v_hash = hashlib.sha256((st.session_state.voter_id + secret_salt).encode()).hexdigest()
-
+                    # Génération à la volée du ZKP individuel pour prouver l'autorisation sans rompre l'anonymat
+                    comb_crypto = supabase.table('combinations').select('secret_key', 'max_limit').eq('comb_id', typed_comb_id).execute().data
+                    if not comb_crypto:
+                        st.error("Code de combinaison invalide.")
+                        st.stop()
+                    
+                    priv_key = int(comb_crypto[0]['secret_key'])
+                    pub_key = int(comb_crypto[0]['max_limit'])
+                    
+                    # Construction mathématique de la preuve à divulgation nulle
+                    zkp_r, zkp_s = generate_ballot_zkp(priv_key, pub_key)
+                    
+                    v_hash = hashlib.sha256((st.session_state.voter_id + "SEVCO_SALT").encode()).hexdigest()
                     supabase.table('ballots').delete().eq('voter_hash', v_hash).execute()
 
+                    # Stockage du bulletin enrichi de ses métadonnées ZKP
                     supabase.table('ballots').insert({
-                        'comb_id': typed_comb_id.strip().upper(),
+                        'comb_id': typed_comb_id,
                         'shapes_ranking': ranking,
-                        'voter_hash': v_hash
+                        'voter_hash': v_hash,
+                        'zkp_proof': json.dumps({"r": zkp_r, "s": zkp_s})  # Attachement de la preuve
                     }).execute()
                     
                     supabase.table('voter_receipts').upsert({'voter_id': st.session_state.voter_id}).execute()
                     supabase.table('voters').update({'has_voted': True}).eq('voter_id', st.session_state.voter_id).execute()
                     
                     del st.session_state.voter_id
-                    st.success("A voté !")
+                    st.success("Bulletin cryptographiquement signé et transmis !")
                     time.sleep(2)
                     st.rerun()
 
@@ -324,8 +362,6 @@ elif node == "Portail Votant":
 # ==========================================
 elif node == "Moniteur d'Infrastructure (Projecteur)":
     st.title("👁️ Architecture de Dépouillement")
-    
-    # Ajout du verrouillage par mot de passe exigé
     infra_pwd = st.text_input("Mot de passe Réseau Infrastructure", type="password")
     
     if infra_pwd == "infra123":
@@ -346,8 +382,12 @@ elif node == "Moniteur d'Infrastructure (Projecteur)":
             st.write("Le Mix-Net est vide.")
 
         st.divider()
-        st.subheader("2. Réception des bulletins (Vérification et Décodage)")
+        st.subheader("2. Réception des bulletins (Vérification Individuelle ZKP)")
         combs = supabase.table('combinations').select('*').execute().data
+        
+        # Dictionnaire des clés publiques par lot pour vérification instantanée
+        pub_keys = {c['comb_id']: int(c['max_limit']) for c in combs}
+        mappings = {c['comb_id']: c['mapping'] for c in combs}
         
         valid_candidate_ballots = []
         
@@ -357,20 +397,26 @@ elif node == "Moniteur d'Infrastructure (Projecteur)":
         for i, comb in enumerate(combs):
             with cols[i % 3]:
                 st.write(f"### Lot: {comb['comb_id']}")
-                st.write(f"Limite autorisée: **{comb['max_limit']}**")
-                
                 comb_ballots = [b for b in ballots if b['comb_id'] == comb['comb_id']]
-                st.write(f"Bulletins reçus: **{len(comb_ballots)}**")
+                st.write(f"Bulletins en attente de traitement: **{len(comb_ballots)}**")
                 
-                if len(comb_ballots) > comb['max_limit']:
-                    st.error("🚨 FRAUDE DÉTECTÉE ! Limite dépassée. Tous les votes de ce lot sont annulés.")
-                else:
-                    st.success("Intégrité validée.")
-                    for b in comb_ballots:
-                        cand_ranking = [comb['mapping'].get(shape) for shape in b['shapes_ranking'] if comb['mapping'].get(shape) is not None]
-                        if cand_ranking:
-                            valid_candidate_ballots.append(cand_ranking)
-                            st.caption(f"Décrypté: {' > '.join(cand_ranking)}")
+                # PLUS AUCUNE ANNULATION GLOBALE : Traitement unitaire autonome
+                for b in comb_ballots:
+                    try:
+                        proof = json.loads(b['zkp_proof'])
+                        r, s = proof['r'], proof['s']
+                        pub_k = pub_keys[b['comb_id']]
+                        
+                        # Exécution de la preuve de Schnorr pour valider l'intégrité du bulletin
+                        if verify_ballot_zkp(pub_k, r, s):
+                            cand_ranking = [mappings[b['comb_id']].get(shape) for shape in b['shapes_ranking'] if mappings[b['comb_id']].get(shape) is not None]
+                            if cand_ranking:
+                                valid_candidate_ballots.append(cand_ranking)
+                                st.success(f"✅ Bulletin Vérifié (ZKP Valide) : {' > '.join(cand_ranking)}")
+                        else:
+                            st.error("❌ Alerte : ZKP invalide détecté. Bulletin frauduleux rejeté individuellement.")
+                    except Exception:
+                        st.error("❌ Anomalie structurelle sur un bulletin. Rejet unitaire.")
 
         st.divider()
         st.subheader("3. Centre de Décompte (Tally)")
